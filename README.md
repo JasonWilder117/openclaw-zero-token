@@ -15,11 +15,11 @@ English | [简体中文](README.zh-CN.md)
 - [Quick Start](#quick-start)
 - [Usage](#usage)
 - [Configuration](#configuration)
+- [Security](#security)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap](#roadmap)
 - [Adding New Platforms](#adding-new-platforms)
 - [File Structure](#file-structure)
-- [Security Notes](#security)
 - [Sync With Upstream](#upstream-sync)
 - [Contributing](#contributing)
 - [License](#license)
@@ -73,7 +73,7 @@ Agent file access is restricted by the configured **workspace** directory (see `
 
 ### Extra features
 
-**AskOnce: one question, answers from all models.**  
+**AskOnce: one question, answers from all models.**
 AskOnce can broadcast a single query to multiple configured providers and show their replies side by side.
 
 ![AskOnce: ask once, multi-model answers](askonce.png)
@@ -183,7 +183,7 @@ Daily:
 #### Clone the repo
 
 ```bash
-git clone https://github.com/linuxhsj/openclaw-zero-token.git
+git clone https://github.com/JasonWilder117/openclaw-zero-token.git
 cd openclaw-zero-token
 ```
 
@@ -239,7 +239,7 @@ node openclaw.mjs onboard
 # To add more providers later, just run ./onboard.sh webauth again.
 ```
 
-Follow the prompts (choose e.g. **DeepSeek (Browser Login)** and **Automated Login (Recommended)**).  
+Follow the prompts (choose e.g. **DeepSeek (Browser Login)** and **Automated Login (Recommended)**).
 To add more providers later, just run `./onboard.sh webauth` again.
 
 #### Step 3: Start the gateway
@@ -369,6 +369,107 @@ node openclaw.mjs tui
 }
 ```
 
+### Gateway bind modes
+
+The gateway supports the following `gateway.bind` modes:
+
+| Mode       | Binds to                                    | Notes                                                        |
+| ---------- | ------------------------------------------- | ------------------------------------------------------------ |
+| `loopback` | `127.0.0.1` (default)                       | Most secure; local access only                               |
+| `tailnet`  | Tailscale IPv4 (100.64.0.0/10)              | Tailscale Serve/Funnel overlay                               |
+| `netbird`  | Netbird WireGuard overlay (100.64.0.0/10)   | **New** — Netbird managed overlay; falls back to loopback    |
+| `lan`      | `0.0.0.0`                                   | All interfaces; use with caution                             |
+| `custom`   | User-specified IP                           | Falls back to `0.0.0.0` if address is unavailable            |
+| `auto`     | Loopback if available, else `0.0.0.0`       | Convenience mode                                             |
+
+### Gateway auth modes
+
+| Mode             | Description                                                                 |
+| ---------------- | --------------------------------------------------------------------------- |
+| `token`          | Bearer token required (default)                                             |
+| `password`       | Password-based auth                                                         |
+| `trusted-proxy`  | Delegate auth to a trusted upstream proxy                                   |
+| `none`           | ⚠️ Disables all auth — **requires `OPENCLAW_ALLOW_AUTH_NONE=1`** env flag  |
+
+> **Security:** `gateway.auth.mode = none` is **blocked by default** since this release.
+> You must explicitly set `OPENCLAW_ALLOW_AUTH_NONE=1` in your environment to enable it.
+> This prevents silent misconfiguration from exposing the gateway to unauthenticated access.
+
+---
+
+## Security
+
+This section documents the security hardening changes introduced in the Hermes security pass (June 2026).
+
+### auth.mode = none is now blocked by default
+
+Setting `gateway.auth.mode` to `none` will cause the gateway to **refuse to start** unless you explicitly opt in:
+
+```bash
+OPENCLAW_ALLOW_AUTH_NONE=1 ./server.sh
+```
+
+This guards against accidental misconfiguration that could expose the gateway without authentication (addresses CVE-2026-25253 and CVE-2026-25593).
+
+### Rate-limiter required for brute-force protection
+
+`authorizeGatewayConnect` now emits a warning if no `rateLimiter` instance is passed:
+
+```
+[openclaw-security] authorizeGatewayConnect called without a rateLimiter — brute-force protection is disabled
+```
+
+Always configure `gateway.auth.rateLimit` in production deployments.
+
+### X-Real-IP spoofing prevention
+
+`allowRealIpFallback` is permanently locked to `false` inside the gateway auth layer.
+This means the gateway will never trust the `X-Real-IP` header to infer a client's IP address,
+preventing IP spoofing attacks where an attacker forges a loopback/trusted-IP classification.
+
+### Netbird WireGuard overlay support
+
+The gateway now recognises **Netbird** as a first-class network overlay alongside Tailscale:
+
+- Bind mode `netbird` binds to the Netbird WireGuard interface (`100.64.0.0/10` range).
+- `isLocalishHost()` now treats `*.netbird.cloud` DNS names and `100.64.0.0/10` IPs as local-facing.
+- Tailscale compatibility is fully retained.
+
+### Credential drop warning for --gateway-url overrides
+
+When `--gateway-url` is passed as a CLI flag, credentials are intentionally **not forwarded** to the target host to prevent accidental token leakage. A warning is now printed:
+
+```
+[openclaw-security] Gateway URL override provided via CLI flag — credentials will NOT be forwarded.
+If this is a trusted host, use the OPENCLAW_GATEWAY_URL environment variable instead.
+```
+
+Use `OPENCLAW_GATEWAY_URL` (env source) if you need credentials forwarded to a remote host.
+
+### CLAWDBOT_GATEWAY_PASSWORD deprecation
+
+The legacy `CLAWDBOT_GATEWAY_PASSWORD` environment variable is now deprecated. A runtime warning is printed on startup:
+
+```
+[openclaw-security] CLAWDBOT_GATEWAY_PASSWORD is a deprecated legacy alias.
+Migrate to OPENCLAW_GATEWAY_PASSWORD. Support will be removed in a future release.
+```
+
+### CVEs addressed
+
+| CVE              | Description                                        | Fix                                             |
+| ---------------- | -------------------------------------------------- | ----------------------------------------------- |
+| CVE-2026-25253   | Token theft via WebSocket surface                  | auth.mode=none blocked; rate-limiter warning     |
+| CVE-2026-25593   | Auth bypass via misconfigured auth.mode=none       | assertGatewayAuthModeNoneNotForbidden() guard    |
+| CVE-2026-44115   | Credential disclosure via --gateway-url CLI flag   | Silent credential drop warning added             |
+
+### General security notes
+
+1. **Credential storage**: cookies and bearer tokens live in local `auth.json` and must **never** be committed.
+2. **Session lifetime**: web sessions expire; you may need to re-login from time to time.
+3. **Rate limiting**: web endpoints may enforce rate limits; they are not suited for heavy production workloads.
+4. **Compliance**: this project is for personal learning and experimentation. Always follow each platform's Terms of Service.
+
 ---
 
 ## Troubleshooting
@@ -411,6 +512,11 @@ The doctor command will:
 ### Current focus
 
 - ✅ DeepSeek Web, Qwen intl/cn, Kimi, Claude Web, Doubao, ChatGPT Web, Gemini Web, Grok Web, GLM Web, GLM intl, Manus API — all tested
+- ✅ Netbird WireGuard overlay bind mode
+- ✅ auth.mode=none guard (CVE-2026-25253, CVE-2026-25593)
+- ✅ X-Real-IP spoof prevention
+- ✅ Rate-limiter enforcement warning
+- ✅ CLAWDBOT_GATEWAY_PASSWORD deprecation
 - 🔧 Improve credential capture robustness
 - 📝 Documentation improvements
 
@@ -471,6 +577,12 @@ openclaw-zero-token/
 │   │   └── auth-choice.apply.deepseek-web.ts  # Auth flow
 │   └── browser/
 │       └── chrome.ts                     # Chrome automation
+├── gateway/
+│   ├── net.ts                            # Network utilities + Netbird overlay support
+│   ├── auth.ts                           # Gateway auth logic + security hardening
+│   ├── auth-mode-policy.ts               # auth.mode=none guard
+│   ├── auth-install-policy.ts            # Install-time auth policy + legacy env deprecation
+│   └── credentials.ts                    # Credential resolution + CLI override warning
 ├── ui/                                   # Web UI (Lit 3.x)
 ├── .openclaw-zero-state/                 # Local state (ignored)
 │   ├── openclaw.json                     # Config
@@ -478,15 +590,6 @@ openclaw-zero-token/
 │       └── auth.json                     # Credentials (sensitive)
 └── .gitignore                            # Includes .openclaw-zero-state/
 ```
-
----
-
-## Security Notes
-
-1. **Credential storage**: cookies and bearer tokens live in local `auth.json` and must **never** be committed.
-2. **Session lifetime**: web sessions expire; you may need to re-login from time to time.
-3. **Rate limiting**: web endpoints may enforce rate limits; they are not suited for heavy production workloads.
-4. **Compliance**: this project is for personal learning and experimentation. Always follow each platform’s Terms of Service.
 
 ---
 
@@ -526,6 +629,6 @@ PRs are welcome, especially for:
 
 ## Disclaimer
 
-This project is for learning and research only.  
-When using it to access any third-party service, you are responsible for complying with that service’s Terms of Use.  
+This project is for learning and research only.
+When using it to access any third-party service, you are responsible for complying with that service's Terms of Use.
 The authors are not liable for any issues caused by misuse of this project.
